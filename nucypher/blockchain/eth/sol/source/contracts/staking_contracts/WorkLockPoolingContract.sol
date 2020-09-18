@@ -47,27 +47,30 @@ contract WorkLockPoolingContract is InitializableStakingContract, Ownable {
 
     StakingEscrow public escrow;
     WorkLock public workLock;
-    address workerOwner;
+    address public workerOwner;
 
     uint256 public totalDepositedTokens;
-    uint256 public worklockClaimedTokens;
+    uint256 public workLockClaimedTokens;
 
     uint256 public totalWithdrawnReward;
     uint256 public totalWithdrawnETH;
 
-    uint256 public totalWorklockETHReceived;
-    uint256 public totalWorklockETHRefunded;
-    uint256 public totalWorklockETHWithdrawn;
+    uint256 public totalWorkLockETHReceived;
+    uint256 public totalWorkLockETHRefunded;
+    uint256 public totalWorkLockETHWithdrawn;
 
-    uint256 public workerFraction;
+    uint256 workerFraction;
     uint256 public workerWithdrawnReward;
-    uint256 public workerWithdrawnETH;
 
     mapping(address => Delegator) public delegators;
     bool depositIsEnabled = true;
 
     /**
      * @notice Initialize function for using with OpenZeppelin proxy
+     * @param _workerFraction Share of token reward that worker node owner will get.
+     * Use value up to BASIS_FRACTION, where BASIS_FRACTION means 100% reward as commission
+     * @param _router StakingInterfaceRouter address
+     * @param _workerOwner Owner of worker node, only this address can withdraw worker commission
      */
     function initialize(
         uint256 _workerFraction,
@@ -102,7 +105,6 @@ contract WorkLockPoolingContract is InitializableStakingContract, Ownable {
     /**
      * @notice Calculate worker's fraction depending on deposited tokens
      */
-    // TODO finish this
     function getWorkerFraction() public view returns (uint256) {
         return workerFraction;
     }
@@ -127,7 +129,7 @@ contract WorkLockPoolingContract is InitializableStakingContract, Ownable {
     function escrowETH() external payable {
         Delegator storage delegator = delegators[msg.sender];
         delegator.depositedETHWorkLock = delegator.depositedETHWorkLock.add(msg.value);
-        totalWorklockETHReceived = totalWorklockETHReceived.add(msg.value);
+        totalWorkLockETHReceived = totalWorkLockETHReceived.add(msg.value);
         workLock.bid{value: msg.value}();
     }
 
@@ -155,24 +157,24 @@ contract WorkLockPoolingContract is InitializableStakingContract, Ownable {
      * @notice Claim tokens in WorkLock and save number of claimed tokens
      */
     function claimTokensFromWorkLock() public {
-        worklockClaimedTokens = workLock.claim();
-        totalDepositedTokens = totalDepositedTokens.add(worklockClaimedTokens);
-        emit Claimed(msg.sender, worklockClaimedTokens);
+        workLockClaimedTokens = workLock.claim();
+        totalDepositedTokens = totalDepositedTokens.add(workLockClaimedTokens);
+        emit Claimed(msg.sender, workLockClaimedTokens);
     }
 
     /**
      * @notice Calculate and save number of claimed tokens for specified delegator
      */
     function calculateAndSaveTokensAmount(Delegator storage _delegator) internal {
-        if (worklockClaimedTokens == 0 ||
+        if (workLockClaimedTokens == 0 ||
             _delegator.depositedETHWorkLock == 0 ||
             _delegator.claimedWorkLockTokens)
         {
             return;
         }
 
-        uint256 delegatorTokensShare = _delegator.depositedETHWorkLock.mul(worklockClaimedTokens)
-            .div(totalWorklockETHReceived);
+        uint256 delegatorTokensShare = _delegator.depositedETHWorkLock.mul(workLockClaimedTokens)
+            .div(totalWorkLockETHReceived);
 
         _delegator.depositedTokens += delegatorTokensShare;
         _delegator.claimedWorkLockTokens = true;
@@ -315,57 +317,20 @@ contract WorkLockPoolingContract is InitializableStakingContract, Ownable {
     }
 
     /**
-     * @notice Get available ether for worker node owner
-     */
-    function getAvailableWorkerETH() public view returns (uint256) {
-        // TODO boilerplate code
-        uint256 balance = address(this).balance;
-        // ETH balance + already withdrawn - (refunded - refundWithdrawn)
-        balance = balance.add(totalWithdrawnETH).add(totalWorklockETHWithdrawn).sub(totalWorklockETHRefunded);
-        uint256 fraction = getWorkerFraction();
-        uint256 maxAllowableETH = balance.mul(fraction).div(BASIS_FRACTION);
-
-        uint256 availableETH = maxAllowableETH.sub(workerWithdrawnETH);
-        if (availableETH > balance) {
-            availableETH = balance;
-        }
-        return availableETH;
-    }
-
-    /**
      * @notice Get available ether for delegator
      */
     function getAvailableETH(address _delegator) public view returns (uint256) {
         Delegator storage delegator = delegators[_delegator];
-        // TODO boilerplate code
         uint256 balance = address(this).balance;
         // ETH balance + already withdrawn - (refunded - refundWithdrawn)
-        balance = balance.add(totalWithdrawnETH).add(totalWorklockETHWithdrawn).sub(totalWorklockETHRefunded);
-        uint256 fraction = getWorkerFraction();
-        uint256 maxAllowableETH = balance.mul(delegator.depositedTokens).mul(BASIS_FRACTION - fraction).div(
-            totalDepositedTokens.mul(BASIS_FRACTION)
-        );
+        balance = balance.add(totalWithdrawnETH).add(totalWorkLockETHWithdrawn).sub(totalWorkLockETHRefunded);
+        uint256 maxAllowableETH = balance.mul(delegator.depositedTokens).div(totalDepositedTokens);
 
         uint256 availableETH = maxAllowableETH.sub(delegator.withdrawnETH);
         if (availableETH > balance) {
             availableETH = balance;
         }
         return availableETH;
-    }
-
-    /**
-     * @notice Withdraw available amount of ETH to worker node owner
-     */
-    function withdrawWorkerETH() external {
-        require(msg.sender == workerOwner);
-        uint256 availableETH = getAvailableWorkerETH();
-        require(availableETH > 0, "There is no available ETH to withdraw");
-
-        workerWithdrawnETH = workerWithdrawnETH.add(availableETH);
-        totalWithdrawnETH = totalWithdrawnETH.add(availableETH);
-
-        msg.sender.sendValue(availableETH);
-        emit ETHWithdrawn(msg.sender, availableETH);
     }
 
     /**
@@ -394,7 +359,7 @@ contract WorkLockPoolingContract is InitializableStakingContract, Ownable {
         }
         workLock.refund();
         uint256 refundETH = address(this).balance - balance;
-        totalWorklockETHRefunded += refundETH;
+        totalWorkLockETHRefunded += refundETH;
         emit Refund(msg.sender, refundETH);
     }
 
@@ -403,11 +368,11 @@ contract WorkLockPoolingContract is InitializableStakingContract, Ownable {
      */
     function getAvailableRefund(address _delegator) public view returns (uint256) {
         Delegator storage delegator = delegators[_delegator];
-        uint256 maxAllowableETH = totalWorklockETHRefunded.mul(delegator.depositedETHWorkLock)
-            .div(totalWorklockETHReceived);
+        uint256 maxAllowableETH = totalWorkLockETHRefunded.mul(delegator.depositedETHWorkLock)
+            .div(totalWorkLockETHReceived);
 
         uint256 availableETH = maxAllowableETH.sub(delegator.refundedETHWorkLock);
-        uint256 balance = totalWorklockETHRefunded.sub(totalWorklockETHWithdrawn);
+        uint256 balance = totalWorkLockETHRefunded.sub(totalWorkLockETHWithdrawn);
 
         if (availableETH > balance) {
             availableETH = balance;
@@ -425,7 +390,7 @@ contract WorkLockPoolingContract is InitializableStakingContract, Ownable {
         Delegator storage delegator = delegators[msg.sender];
         delegator.refundedETHWorkLock = delegator.refundedETHWorkLock.add(availableETH);
 
-        totalWorklockETHWithdrawn = totalWorklockETHWithdrawn.add(availableETH);
+        totalWorkLockETHWithdrawn = totalWorkLockETHWithdrawn.add(availableETH);
         msg.sender.sendValue(availableETH);
         emit Refund(msg.sender, availableETH);
     }
